@@ -21,6 +21,8 @@ instrumentos con precios de $0.00002 y de $90,000.
 
 import sys
 
+REF = 1000.0   # nocional de referencia en USD: todo se compara por $1,000
+
 SIMBOLOS = [
     "ADAUSD", "AVAXUSD", "BCHUSD", "BNBUSD", "COMPUSD", "DOGEUSD", "DOTUSD",
     "ETCUSD", "GLMRUSD", "KSMUSD", "LINKUSD", "SOLUSD", "UNIUSD", "XLMUSD",
@@ -72,37 +74,51 @@ def analizar(mt5, nombre, lote):
 
     precio = (tick.bid + tick.ask) / 2.0
     tam = info.trade_contract_size
-    nocional = precio * tam * lote
-    if nocional <= 0:
+    noc_lote = precio * tam           # nocional de UN lote
+    if noc_lote <= 0:
         return None
 
-    # spread: ida y vuelta = pagas el spread una vez al abrir
+    # --- EL SPREAD ES LO UNICO QUE NO DEPENDE DE SUPUESTOS DE UNIDADES:
+    # sale de bid/ask en vivo. Fiable siempre.
     spread_px = tick.ask - tick.bid
-    spread_dinero = spread_px * tam * lote
     spread_pct = 100.0 * spread_px / precio
 
-    # swap: el campo esta en puntos para casi todos los CFD
-    unidad = info.point * tam * lote
-    swap_l = info.swap_long * unidad
-    swap_s = info.swap_short * unidad
-    carry_l = 100.0 * swap_l * 365.0 / nocional
-    carry_s = 100.0 * swap_s * 365.0 / nocional
+    # --- TODO LO DEMAS SE NORMALIZA A $1,000 DE NOCIONAL.
+    # Los contract_size van de 1 a 100,000 entre estos simbolos, asi que
+    # "un lote" significa $1 en uno y $99,970 en otro: comparar por lote
+    # no tiene sentido. Por $1,000 si.
+    lotes_1k = REF / noc_lote
 
-    # margen real, preguntado al broker
+    unidad = info.point * tam         # 1 punto de swap -> dinero por lote
+    swap_l_lote = info.swap_long * unidad
+    swap_s_lote = info.swap_short * unidad
+    swap_l = swap_l_lote * lotes_1k   # por noche, por $1,000
+    swap_s = swap_s_lote * lotes_1k
+    carry_l = 100.0 * swap_l * 365.0 / REF
+    carry_s = 100.0 * swap_s * 365.0 / REF
+
     margen = mt5.order_calc_margin(mt5.ORDER_TYPE_BUY, nombre, lote, tick.ask)
-    apal = (nocional / margen) if margen else float("nan")
+    apal = (noc_lote * lote / margen) if margen else float("nan")
 
-    # cuantos dias de swap equivalen a pagar el spread una vez
+    spread_1k = REF * spread_pct / 100.0
     peor = min(swap_l, swap_s)
-    dias_eq = (spread_dinero / abs(peor)) if peor < 0 else float("inf")
+    dias_eq = (spread_1k / abs(peor)) if peor < 0 else float("inf")
+
+    # --- marca de fiabilidad: con nocionales por lote diminutos, el campo
+    # de swap (2 decimales) tiene tan poca resolucion que el % se dispara.
+    dudoso = []
+    if noc_lote < 50:
+        dudoso.append("nocional/lote $%.2f" % noc_lote)
+    if max(abs(carry_l), abs(carry_s)) > 150:
+        dudoso.append("carry absurdo")
 
     return {
-        "sim": nombre, "precio": precio, "nocional": nocional,
-        "spread_pct": spread_pct, "spread_dinero": spread_dinero,
+        "sim": nombre, "precio": precio, "noc_lote": noc_lote,
+        "spread_pct": spread_pct, "spread_1k": spread_1k,
         "swap_l": swap_l, "swap_s": swap_s,
         "carry_l": carry_l, "carry_s": carry_s,
         "margen": margen, "apal": apal, "dias_eq": dias_eq,
-        "lote_min": info.volume_min,
+        "lote_min": info.volume_min, "dudoso": dudoso,
     }
 
 
@@ -141,8 +157,10 @@ def main():
     print("=" * 118)
     print()
     cab = "%-11s %12s %12s %8s %10s %10s %9s %9s %9s %7s"
-    print(cab % ("simbolo", "precio", "nocional", "spread%", "swap L",
-                 "swap S", "carry L%", "carry S%", "margen", "apal"))
+    print("Todo por $1,000 de nocional, salvo precio, margen (1 lote) y apalancamiento.")
+    print()
+    print(cab % ("simbolo", "precio", "noc/lote", "spread%", "swap L", "swap S",
+                 "carry L%", "carry S%", "margen", "apal"))
     print("-" * 118)
 
     def fmt_px(p):
@@ -156,7 +174,7 @@ def main():
         print(cab % (
             r["sim"],
             fmt_px(r["precio"]),
-            "%.0f" % r["nocional"],
+            "%.0f" % r["noc_lote"],
             "%.3f" % r["spread_pct"],
             "%+.2f" % r["swap_l"],
             "%+.2f" % r["swap_s"],
@@ -164,7 +182,7 @@ def main():
             "%+.1f" % r["carry_s"],
             ("%.0f" % r["margen"]) if r["margen"] else "n/d",
             ("%.0f:1" % r["apal"]) if r["apal"] == r["apal"] else "n/d",
-        ))
+        ) + ("   <- %s" % "; ".join(r["dudoso"]) if r["dudoso"] else ""))
 
     print()
     print("=" * 118)
@@ -181,8 +199,9 @@ def main():
     for r in caro:
         print("    %-11s %6.3f%%" % (r["sim"], r["spread_pct"]))
 
-    pagan_l = sorted(filas, key=lambda x: x["carry_l"])[:5]
-    cobran_s = sorted(filas, key=lambda x: -x["carry_s"])[:5]
+    fiables = [f for f in filas if not f["dudoso"]]
+    pagan_l = sorted(fiables, key=lambda x: x["carry_l"])[:5]
+    cobran_s = sorted(fiables, key=lambda x: -x["carry_s"])[:5]
     print("\n  Mas CARO estar LARGO (carry anualizado):")
     for r in pagan_l:
         print("    %-11s %+8.1f%%/ano   (%+.2f por noche)" % (r["sim"], r["carry_l"], r["swap_l"]))
@@ -191,7 +210,7 @@ def main():
         print("    %-11s %+8.1f%%/ano   (%+.2f por noche)" % (r["sim"], r["carry_s"], r["swap_s"]))
 
     print("\n  Donde el SPREAD se come el swap mas rapido:")
-    for r in sorted([f for f in filas if f["dias_eq"] < 1e6], key=lambda x: x["dias_eq"])[:5]:
+    for r in sorted([f for f in fiables if f["dias_eq"] < 1e6], key=lambda x: x["dias_eq"])[:5]:
         print("    %-11s un spread = %.1f dias de swap" % (r["sim"], r["dias_eq"]))
 
     if faltan:
@@ -199,8 +218,11 @@ def main():
         print("  No encontrados en tu broker (%d): %s" % (len(faltan), ", ".join(faltan)))
 
     print()
-    print("  NOTA: 'carry %/ano' = swap por noche x 365 / nocional. Es la unica")
-    print("  columna que hace comparable un activo de $0.00002 con uno de $90,000.")
+    n_malos = len([f for f in filas if f["dudoso"]])
+    print("  Filas marcadas <- : el nocional de 1 lote es tan pequeno que el campo de")
+    print("  swap (2 decimales) no tiene resolucion. Su carry %% no es de fiar y quedan")
+    print("  fuera de los rankings de carry. Son %d de %d. El SPREAD si es fiable en todas:" % (n_malos, len(filas)))
+    print("  sale de bid/ask en vivo y no depende de ningun supuesto de unidades.")
     print()
     mt5.shutdown()
 
