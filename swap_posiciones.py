@@ -78,10 +78,10 @@ def analizar_simbolo(mt5, simbolo, posiciones, ahora):
         print("     asi que multiplicar por dias naturales sale correcto.")
     print()
 
-    cab = "  %-5s %6s %12s %12s %6s %10s %10s %10s %12s"
+    cab = "  %-5s %6s %12s %12s %6s %10s %10s %10s %11s %12s"
     print(cab % ("tipo", "lotes", "entrada", "abierta", "dias",
-                 "flotante", "swap", "swap/dia", "breakeven"))
-    print("  " + "-" * 90)
+                 "precio", "swap", "swap/dia", "si cierras", "breakeven"))
+    print("  " + "-" * 102)
 
     grupos = {"BUY": [], "SELL": []}
     recien = 0
@@ -101,6 +101,7 @@ def analizar_simbolo(mt5, simbolo, posiciones, ahora):
                      abierta.strftime("%d-%m-%Y"), str(dias),
                      "%+.2f" % p.profit, "%+.2f" % p.swap,
                      ("%+.2f" % por_dia) if dias > 0 else "-",
+                     "%+.2f" % (p.profit + p.swap),
                      "%.5f" % be))
         grupos[tipo].append({"vol": p.volume, "swap": p.swap, "dias": dias,
                              "flot": p.profit, "entrada": p.price_open})
@@ -144,9 +145,12 @@ def analizar_simbolo(mt5, simbolo, posiciones, ahora):
                 dif,
                 "(la tasa cambio desde que abriste)" if abs(dif) > 15 else "(coherente)"))
         print()
-        print("  flotante de precio (sin swap)      %+10.2f" % (flot - swap_ac))
-        print("  swap                               %+10.2f" % swap_ac)
-        print("  flotante total                     %+10.2f" % flot)
+        # OJO: en MT5, position.profit es SOLO el movimiento del precio.
+        # El swap va en su propio campo. Sumarlos da lo que entra al balance
+        # al cerrar. (Una version anterior los restaba: estaba mal.)
+        print("  flotante de precio (sin swap)      %+10.2f" % flot)
+        print("  swap ya acumulado                  %+10.2f" % swap_ac)
+        print("  SI CIERRAS AHORA                   %+10.2f" % (flot + swap_ac))
         print()
         print("  si no tocas nada, a la tasa de hoy:  %+.2f por noche" % por_noche)
         for n in (7, 30, 90):
@@ -218,15 +222,18 @@ def main():
     print("  %-12s %9s %9s %9s %12.2f %12.2f" % (
         "TOTAL", "", "", "", swap_total, noche_total))
     print()
+    print("  flotante de precio del libro      %+10.2f" % flot_total)
     print("  swap acumulado hasta hoy          %+10.2f" % swap_total)
+    print("  SI CIERRAS TODO AHORA             %+10.2f" % (flot_total + swap_total))
+    print()
     print("  swap por noche a la tasa de hoy   %+10.2f" % noche_total)
     print("  al mes (30 noches)                %+10.2f" % (noche_total * 30))
-    print("  flotante total del libro          %+10.2f" % flot_total)
 
     ac = mt5.account_info()
     if ac and ac.equity > 0:
         print()
-        print("  equity   %10.2f" % ac.equity)
+        print("  balance  %10.2f" % ac.balance)
+        print("  equity   %10.2f   (balance + flotante + swap)" % ac.equity)
         print("  el carry de un mes es el %.1f%% de tu equity" % (
             abs(noche_total) * 30 / ac.equity * 100))
         if noche_total < 0:
